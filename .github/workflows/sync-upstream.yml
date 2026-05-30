@@ -9,7 +9,7 @@ on:
       upstream_repo:
         description: '上游仓库地址 (可选，例如: https://github.com/ORIGINAL_OWNER/ORIGINAL_REPO.git)'
         required: false
-        default: ''
+        default: 'https://github.com/byjoey/cfnew.git'
       upstream_branch:
         description: '上游分支 (默认: main)'
         required: false
