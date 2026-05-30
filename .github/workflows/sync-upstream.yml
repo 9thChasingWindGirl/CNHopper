@@ -1,0 +1,159 @@
+name: Sync Upstream and Protect Custom Branch
+
+on:
+  schedule:
+    # 每天 UTC 0:00 自动运行（北京时间 8:00）
+    - cron: '0 0 * * *'
+  workflow_dispatch:  # 允许手动触发
+    inputs:
+      upstream_repo:
+        description: '上游仓库地址 (可选，例如: https://github.com/ORIGINAL_OWNER/ORIGINAL_REPO.git)'
+        required: false
+        default: ''
+      upstream_branch:
+        description: '上游分支 (默认: main)'
+        required: false
+        default: 'main'
+      force_rebase:
+        description: '强制 rebase (true/false)'
+        required: false
+        default: 'false'
+
+jobs:
+  sync-upstream:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+
+      - name: Set variables
+        id: vars
+        run: |
+          echo "timestamp=$(date +%Y%m%d-%H%M%S)" >> $GITHUB_OUTPUT
+          echo "custom_branch=custom/main" >> $GITHUB_OUTPUT
+
+      - name: Fetch all branches
+        run: git fetch --all --prune
+
+      - name: Check if custom branch exists
+        id: check-branch
+        run: |
+          if git ls-remote --heads origin ${{ steps.vars.outputs.custom_branch }}; then
+            echo "branch_exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "branch_exists=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Sync main branch
+        run: |
+          git checkout main
+          
+          # 如果指定了上游仓库，从上游同步
+          if [ -n "${{ inputs.upstream_repo }}" ]; then
+            echo "从上游仓库同步: ${{ inputs.upstream_repo }}"
+            git remote add upstream "${{ inputs.upstream_repo }}" || git remote set-url upstream "${{ inputs.upstream_repo }}"
+            git fetch upstream
+            git merge upstream/${{ inputs.upstream_branch }} --ff-only || true
+          else
+            echo "从 origin/main 同步"
+            git pull origin main --ff-only || true
+          fi
+          
+          # 推送 main 分支更新
+          git push origin main || true
+
+      - name: Checkout custom branch
+        if: steps.check-branch.outputs.branch_exists == 'true'
+        run: |
+          git checkout ${{ steps.vars.outputs.custom_branch }} || git checkout -b ${{ steps.vars.outputs.custom_branch }} origin/${{ steps.vars.outputs.custom_branch }}
+
+      - name: Create temporary sync branch
+        run: |
+          git checkout -b sync-temp-${{ steps.vars.outputs.timestamp }}
+
+      - name: Attempt rebase
+        id: rebase
+        continue-on-error: true
+        run: |
+          git rebase main
+          echo "status=success" >> $GITHUB_OUTPUT
+
+      - name: Handle rebase success
+        if: steps.rebase.outputs.status == 'success'
+        run: |
+          echo "✅ Rebase 成功！"
+          git checkout ${{ steps.vars.outputs.custom_branch }}
+          git merge --ff-only sync-temp-${{ steps.vars.outputs.timestamp }}
+          git push origin ${{ steps.vars.outputs.custom_branch }} --force-with-lease
+          echo "✅ 已成功更新 ${{ steps.vars.outputs.custom_branch }}！"
+
+      - name: Handle rebase failure - Create PR
+        if: steps.rebase.outputs.status != 'success' && steps.check-branch.outputs.branch_exists == 'true'
+        uses: peter-evans/create-pull-request@v5
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: 'chore: sync upstream with conflicts'
+          title: '⚠️ 需要手动解决: 同步上游更新'
+          body: |
+            # 同步上游更新时检测到冲突
+            
+            自动同步工作流在尝试合并上游更新时遇到了冲突。
+            
+            ## 需要手动解决的步骤：
+            
+            1. 本地 checkout 到这个 PR 分支
+            2. 解决冲突
+            3. 测试修改
+            4. 合并 PR
+            
+            ## 分支信息
+            - 源分支: main
+            - 目标分支: ${{ steps.vars.outputs.custom_branch }}
+            - 创建时间: ${{ steps.vars.outputs.timestamp }}
+            
+            ---
+            *由 GitHub Actions 自动生成*
+          branch: sync-upstream-${{ steps.vars.outputs.timestamp }}
+          base: ${{ steps.vars.outputs.custom_branch }}
+          delete-branch: true
+
+      - name: Create custom branch if not exists
+        if: steps.check-branch.outputs.branch_exists == 'false'
+        run: |
+          echo "创建 ${{ steps.vars.outputs.custom_branch }} 分支..."
+          git checkout -b ${{ steps.vars.outputs.custom_branch }}
+          
+          # 确保有基本的配置文件
+          if [ ! -f "wrangler.toml" ]; then
+            echo "wrangler.toml 不存在，请确保仓库中有部署配置"
+          fi
+          
+          git push -u origin ${{ steps.vars.outputs.custom_branch }}
+          echo "✅ 已创建并推送 ${{ steps.vars.outputs.custom_branch }} 分支！"
+
+      - name: Cleanup temporary branch
+        if: always()
+        continue-on-error: true
+        run: |
+          git checkout main
+          git branch -D sync-temp-${{ steps.vars.outputs.timestamp }} 2>/dev/null || true
+
+      - name: Summary
+        run: |
+          echo "# 同步状态总结" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- 自定义分支: ${{ steps.vars.outputs.custom_branch }}" >> $GITHUB_STEP_SUMMARY
+          echo "- 同步时间: $(date)" >> $GITHUB_STEP_SUMMARY
+          echo "- Rebase 状态: ${{ steps.rebase.outputs.status || 'skipped' }}" >> $GITHUB_STEP_SUMMARY
