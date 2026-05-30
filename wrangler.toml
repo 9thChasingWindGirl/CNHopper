@@ -1,1 +1,8 @@
+name = "cfnew-worker"
+main = "index.js"
 compatibility_date = "2026-01-20"
+
+# 环境变量示例（部署时可在 Cloudflare 控制台配置）
+[vars]
+# u = "your-uuid-here"
+# d = "custom-path"
